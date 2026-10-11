@@ -1,0 +1,9 @@
+.git
+.env
+.venv
+infra
+.bundle.tar.gz
+
+**/__pycache__
+**/*.pyc
+postman

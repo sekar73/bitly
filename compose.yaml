@@ -1,0 +1,77 @@
+name: bitly-lab
+x-backend: &backend
+  build: .
+  restart: unless-stopped
+  environment: &environment
+    DATABASE_URL: postgresql://bitly:${POSTGRES_PASSWORD}@postgres:5432/bitly
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: ${JWT_SECRET:?Run scripts/local-deploy.sh to generate JWT_SECRET}
+    JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-30}
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    restart: unless-stopped
+    ports:
+      - '${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:80'
+    depends_on:
+      read:
+        condition: service_healthy
+      write:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1/health/read && wget -q -O /dev/null http://127.0.0.1/health/write']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 32m
+  write:
+    <<: *backend
+    environment:
+      <<: *environment
+      SERVICE_ROLE: write
+    command: uvicorn app.write:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+  read:
+    <<: *backend
+    environment:
+      <<: *environment
+      SERVICE_ROLE: read
+    command: uvicorn app.read:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'
+    depends_on:
+      write:
+        condition: service_healthy
+    mem_limit: 160m
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bitly
+      POSTGRES_USER: bitly
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U bitly']
+      interval: 5s
+      retries: 20
+    mem_limit: 256m
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 32mb --maxmemory-policy allkeys-lru --save "" --appendonly no
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      retries: 20
+    mem_limit: 64m
+volumes:
+  postgres-data:
+    labels:
+      project: bitly-lab

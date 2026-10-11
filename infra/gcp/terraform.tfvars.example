@@ -1,0 +1,5 @@
+project_id = "YOUR-GOOGLE-CLOUD-PROJECT-ID"
+region = "us-central1"
+zone = "us-central1-a"
+allowed_cidr = "203.0.113.10/32" # Replace with your public IPv4 /32
+machine_type = "e2-micro" # 1 GiB, eligible for Free Tier subject to your account limits
