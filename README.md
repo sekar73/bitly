@@ -2,6 +2,8 @@
 
 A complete learning app built from scratch: separate FastAPI read/write services (Python), an Nginx API gateway, PostgreSQL 16, Redis 7 and a lightweight HTML/CSS/JavaScript frontend. You do not need Node.js. The attached drawing is an architecture reference; the interface provides a matching architecture overview alongside a link management dashboard.
 
+For development, start with [AGENTS.md](AGENTS.md) and the focused [feature map](docs/feature-map.md). Reference docs cover [architecture](docs/architecture.md), [decisions](docs/decisions.md), [deployment commands](docs/deployment.md), [current handoff](docs/status.md), and [working efficiently with an LLM](docs/working-efficiently.md). These keep routine coding context small; this README remains the full beginner setup and cost guide.
+
 ## Start locally
 
 Install Docker Desktop with Compose and Python 3 (used by the local deployment script and tests). The app itself runs on Python 3.12 inside Docker; no host pip installation is needed. Start Docker Desktop, then run from this directory:
