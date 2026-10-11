@@ -45,98 +45,153 @@ Passwords are salted and hashed using Argon2id; plaintext passwords are never st
 
 Sign-out clears the browser token; it does not revoke a copied token, which remains usable until expiry. There are no refresh tokens, password reset, email verification or individual-session revocation in this lab. Turning off a user's `is_active` flag rejects their existing tokens; rotating JWT_SECRET rejects all existing tokens after app restart. Before unrestricted public deployment, add HTTPS, authentication rate limits and abuse controls.
 
-When upgrading from the shared-token version, `local-deploy.sh` and `aws-deploy.sh` append a new random JWT_SECRET to an existing `.env`. The old ADMIN_TOKEN is no longer accepted and may be removed. Startup adds the users table and nullable `urls.created_by` foreign key without deleting data. Pre-existing links remain public and unowned: no user can list/edit/delete them. Assign ownership only through a deliberate administrator DB migration; the first registrant does not inherit legacy links.
+## Deploy to Google Cloud
 
-## AWS setup and deployment
+The default deployment is one Debian 12 Compute Engine `e2-micro` VM in `us-central1-a`, with a 20 GB `pd-standard` boot/database disk, an ephemeral public IPv4, a dedicated VPC/subnet and a firewall allowing SSH (22) and HTTP (80) only from your public IPv4 `/32`. PostgreSQL and Redis stay inside Docker. No managed database, managed Redis, Kubernetes cluster, cloud load balancer or NAT gateway is provisioned.
 
-Recommended learning deployment: one `t3.micro` EC2 VM with Docker Compose. It contains the gateway, read service, write service, PostgreSQL and Redis, in a dedicated VPC/public subnet in `us-east-1`. Only SSH and HTTP from your configured CIDR are permitted; database/cache ports are never exposed. No NAT gateway, load balancer, RDS, ElastiCache, domain or Elastic IP is provisioned. EC2's public IP is the URL and may change after stop/start. Short URLs from the old address then stop working.
+Cloud deployment creates an empty database; it does not upload local data or local secrets. Use a dedicated GCP project to make resource identification and billing easier.
 
-Install Terraform >=1.6, AWS CLI v2, OpenSSH and tar. Configure AWS credentials via `aws configure` or AWS SSO (`aws sso login --profile your-profile` and `export AWS_PROFILE=your-profile`). Use a deployment identity authorized for EC2/VPC/key pairs and AWS Budgets, not root credentials. These scripts use your credentials locally; the instance gets no AWS IAM role.
+1. Install Terraform >=1.6 and the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install). Create a cloud project and attach your billing account.
+2. Authenticate the CLI and Terraform, select the project, and enable Compute Engine:
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/bitly-lab
-cp infra/terraform.tfvars.example infra/terraform.tfvars
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable compute.googleapis.com --project=YOUR_PROJECT_ID
 ```
 
-Edit `infra/terraform.tfvars`:
+The deployment identity needs permissions to manage Compute Engine networking, VMs and disks, enable APIs, and use OS Login with sudo. Typical project roles are Compute Admin, Service Usage Admin and Compute OS Admin Login (or narrower equivalent permissions). The VM does not need an attached service account for this application.
 
-- `allowed_cidr`: your actual public IPv4 with `/32` (the example address is a placeholder). Update this if your ISP changes your address.
-- `ssh_public_key`: the complete contents of `~/.ssh/bitly-lab.pub`.
-- `budget_email`: your email address; default budget is $15/month.
-- `project`: a unique slug such as `bitly-lab`. Use separate project directories/Terraform state for future projects.
+3. Create a project-scoped billing budget as described below.
+4. Configure Terraform:
 
 ```bash
-export SSH_KEY="$HOME/.ssh/bitly-lab"
-./scripts/aws-deploy.sh
+cp infra/gcp/terraform.tfvars.example infra/gcp/terraform.tfvars
 ```
 
-The script initializes Terraform, validates it, displays a saved plan and asks you to type `deploy` before spending money. It waits for cloud-init, uploads only application source, generates separate credentials on the VM, builds containers, and checks health. It can be re-run for code updates. A partial deployment can leave resources running; fix the problem and re-run, or destroy them. Inspect `/var/log/cloud-init-output.log` for bootstrap failures and `sudo docker compose logs` in `/opt/bitly` for application failures. Build-time swap helps the 1 GiB instance; it is not a performance substitute for RAM.
+Edit the file with your own values:
 
-HTTP on the VM is unencrypted. Use SSH forwarding for all token-based management:
-
-```bash
-ssh -i "$SSH_KEY" -L 8080:localhost:80 ec2-user@PUBLIC_IP
-# In the instance shell:
-# Keep the tunnel running while using the browser.
+```hcl
+project_id   = "YOUR_PROJECT_ID"
+region       = "us-central1"
+zone         = "us-central1-a"
+allowed_cidr = "YOUR_PUBLIC_IPV4/32"
+machine_type = "e2-micro"
 ```
 
-Open http://localhost:8080 and register or sign in. Access via this tunnel encrypts transport to EC2. To share links with others, their IP must be included in the allowed network; the default intentionally permits only your address. A public version needs HTTPS and proper user access controls. Public HTTP links are suitable only for this restricted learning demo.
+`allowed_cidr` is the public IPv4 of the network you connect from, not the VM's IP or your Mac's private Wi-Fi IP. Update it if your network/VPN changes. Terraform automatically reads `infra/gcp/terraform.tfvars` because the script runs Terraform in that directory. The `.example` file is only a template.
 
-Terraform creates a dedicated VPC, subnet, route table, gateway, security group, key pair, VM, encrypted 10 GiB root EBS volume and account-wide monthly budget. Taggable resources carry `Project`, `Environment=learning`, `ManagedBy=Terraform`; the EBS volume is explicitly tagged too. AWS resources without provider tag support use names/state association. The budget deliberately covers the whole account so untagged IPv4 costs and other projects still trigger alerts. Budget names include the project slug.
-
-Terraform state is local in `infra/terraform.tfstate`. Keep it safe: it is how Terraform knows what to delete. Do not delete state before cleanup. `infra/.terraform.lock.hcl` pins provider dependencies and should be committed. Application secrets are generated on the VM, not stored in Terraform state/user data. Changing the AMI or bootstrap may replace the VM and erase data; read every plan before applying.
-
-## Costs and alerts
-
-Planning estimate for us-east-1, 730 hours/month, before taxes/credits (checked October 10, 2026):
-
-| Item | Rate | Monthly estimate |
-|---|---|---|
-| Linux t3.micro | $0.0104/hour | $7.59 |
-| Public IPv4 | $0.005/hour | $3.65 |
-| 10 GiB gp3 EBS | approximately $0.08/GiB-month | $0.80 |
-| Total base infrastructure | | **about $12.04/month** |
-
-Low traffic, ordinary included gp3 performance and no extra backups assumed. Internet transfer and changes to AWS prices can add costs. CPU credits use **standard** mode to avoid unlimited-credit surcharges; sustained CPU activity can be throttled. A larger VM increases costs. Trial credits may offset charges, but verify your exact plan and remaining credits in Billing: eligibility depends on signup date and plan, so do not assume everything is free.
-
-Official references: [EC2 T3 rates](https://aws.amazon.com/ec2/instance-types/t3/), [VPC IPv4 pricing](https://aws.amazon.com/vpc/pricing/), [EBS pricing](https://aws.amazon.com/ebs/pricing/), [Free Tier eligibility](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-free-tier-usage.html), [Budgets pricing](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/).
-
-Terraform provisions email alerts at 50% actual spend and 100% forecasted spend for the account-wide $15 budget. Review the budget in Billing → Budgets and verify its recipient. AWS Budgets alerts are delayed notifications, **not a hard spending cap**, and can arrive after the threshold is exceeded. Basic budget monitoring/notifications are free; no paid budget actions or reports are enabled. Activate the `Project` cost allocation tag in Billing to compare projects; tag activation is an account-level step and billing data takes time to appear.
-
-For the lowest expense, keep the project local and only deploy for practice sessions. Stopping EC2 reduces compute costs but EBS remains billed. Destroying the stack is the cleanest way to end its infrastructure costs.
-
-## Stop, restart and destroy AWS
-
-To temporarily stop the VM, obtain its ID with `terraform -chdir=infra output -raw instance_id`, then use the EC2 console or AWS CLI:
+5. Deploy:
 
 ```bash
-aws ec2 stop-instances --region us-east-1 --instance-ids INSTANCE_ID
-aws ec2 start-instances --region us-east-1 --instance-ids INSTANCE_ID
-terraform -chdir=infra apply -refresh-only
-terraform -chdir=infra output
+./scripts/gcp-deploy.sh
 ```
 
-Docker and containers restart automatically. Use the new IP for SSH and links. Refresh-only may request approval and does not deploy code.
+Review the saved Terraform plan, then type `deploy`. The script creates infrastructure, waits for the startup script, uploads source, generates database/JWT secrets on the VM, builds containers and checks both services. It can be rerun for code updates. A failed deployment may leave billable resources; inspect logs, retry or clean up. Read each plan: replacing the VM/disk can erase data.
 
-To permanently remove this stack:
+The VM and disk have labels `project=bitly-lab`, `environment=learning`, `managed_by=terraform`. Networking names are prefixed with `bitly-lab`, and the firewall targets that VM network tag. Terraform state is stored in `infra/gcp/terraform.tfstate`; keep it until destruction succeeds. Commit the provider lock file, but never commit state, plans, `.tfvars`, `.env` or private keys.
+
+## Access and test the cloud app
+
+The script prints a tunnel command; run it separately **on your Mac** and leave that terminal open:
 
 ```bash
-./scripts/aws-destroy.sh
+gcloud compute ssh bitly-lab --project=YOUR_PROJECT_ID --zone=us-central1-a -- \
+  -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8080:localhost:80
 ```
 
-It shows the destroy plan and requires typing `destroy`. This deletes all AWS link data with the root volume, plus networking, key pair and project budget. It leaves local source/state, SSH keys and local Docker data. It does not delete unrelated resources. Check EC2 → Instances/Volumes/Snapshots and VPC in us-east-1 afterward; the stack creates no snapshots, but any snapshots you made manually must be removed separately. Retain state until the destroy succeeds. Billing totals can continue updating afterward because of reporting delay.
-
-Optional backup before deletion:
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080), register a user, and create a link. Local users are not copied to GCP. The tunnel encrypts transport to the VM; direct `http://VM_PUBLIC_IP` also works from your allowed network but has no HTTPS. Use the tunnel for registration/sign-in/JWT traffic.
 
 ```bash
-# On EC2, /opt/bitly:
+curl http://127.0.0.1:8080/health/read
+curl http://127.0.0.1:8080/health/write
+TEST_BASE_URL=http://127.0.0.1:8080 ./scripts/test.sh
+```
+
+Set Postman's `base_url` to `http://127.0.0.1:8080`. Cloud tests create users that remain after the run; use a learning database. Do not run the local service-isolation script against GCP.
+
+To inspect infrastructure and services:
+
+```bash
+gcloud compute instances list --project=YOUR_PROJECT_ID
+gcloud compute ssh bitly-lab --project=YOUR_PROJECT_ID --zone=us-central1-a
+# On the VM:
+cd /opt/bitly
+sudo docker compose ps
+sudo docker compose logs --tail=100 gateway read write
+sudo docker stats --no-stream
+sudo journalctl -u google-startup-scripts.service
+```
+
+If SSH fails, check OS Login roles and your current public IP against `allowed_cidr`. For startup failures, use `gcloud compute instances get-serial-port-output bitly-lab --project=YOUR_PROJECT_ID --zone=us-central1-a`. These five app services appear as Docker containers within one VM, not five separate Compute Engine instances.
+
+## GCP cost estimate and Free Tier
+
+Planning estimates checked October 10, 2026: USD, `us-central1`, 730 running hours/month, 20 GB provisioned standard disk, before taxes, promotional credits and transfer charges.
+
+| Resource | List rate | Before Free Tier | With available eligible Free Tier |
+|---|---|---:|---:|
+| One e2-micro VM | $0.008376428/hour | about $6.11/month | $0 within eligible VM-hour allowance |
+| 20 GB pd-standard disk | $0.04/GB-month | about $0.80/month | $0 within eligible disk allowance |
+| One in-use public IPv4 | $0.005/hour | about $3.65/month | about $3.65/month; only one IP-hour/month is free |
+| Base total | | **about $10.56/month** | **about $3.65/month**, plus excess usage |
+
+The containerized gateway, Python services, PostgreSQL and Redis have no separate managed-service charge; their resource usage is part of the VM cost. The VPC/subnet/basic firewall configuration adds no separate hourly VM-like fee. No extra snapshots/backups or paid observability features are enabled by Terraform.
+
+Free Tier covers one eligible e2-micro month's hours in us-central1/us-east1/us-west1, 30 GB-months of standard persistent disk and 1 GB of eligible outbound transfer from North America (excluding China/Australia). Allowances are shared across eligible usage, so other projects can consume them. Our defaults fit the VM/disk allowances; public IPv4 is not free for a whole month. Excess internet transfer, extra disks/snapshots, a different region or a larger machine can increase the bill.
+
+Eligible new users receive $300 trial credits valid for 90 days. Credits can offset eligible charges while available; they do not make the stack permanently free. Check your balance, expiry and actual charges in Billing. The 1 GiB VM is tight for this stack; e2-small has more RAM but falls outside the free VM allowance.
+
+Official sources: [VM rates](https://cloud.google.com/products/compute/pricing/general-purpose), [disk rates](https://cloud.google.com/compute/disks-image-pricing), [IPv4/network pricing](https://cloud.google.com/vpc/network-pricing), [Free Tier limits](https://docs.cloud.google.com/free/docs/free-cloud-features), [trial eligibility](https://cloud.google.com/signup-faqs).
+
+An eight-hour overnight run costs roughly $0.04 for IPv4 if VM/disk allowances are available, before transfer and credits. Stopping the VM releases its ephemeral IP and stops compute use, but the disk remains allocated and may still cost money outside the disk allowance. Deleting the stack removes its disk too.
+
+## Set budget alerts before deploying
+
+Budget alerts are configured manually; **this Terraform stack does not create a budget or impose a spending cap**.
+
+In Google Cloud Console → Billing → Budgets & alerts:
+
+1. Create a monthly budget scoped to this project (for example $5 or $10).
+2. Add actual-spend thresholds at 50%, 90% and 100%, plus forecasted 100%.
+3. Verify notification recipients and credit treatment. Include/exclude promotional credits deliberately depending on whether you want alerts on gross usage or net costs.
+4. Check Billing reports after deployment and confirm Free Tier deductions.
+
+Notifications may be delayed and do not stop resources or guarantee that spending stays under the budget. See [Google's budget documentation](https://cloud.google.com/billing/docs/how-to/budgets).
+
+## Stop, restart and destroy GCP resources
+
+Run these on your Mac, replacing the project ID and zone if configured differently:
+
+```bash
+gcloud compute instances stop bitly-lab --project=YOUR_PROJECT_ID --zone=us-central1-a
+gcloud compute instances start bitly-lab --project=YOUR_PROJECT_ID --zone=us-central1-a
+gcloud compute instances list --project=YOUR_PROJECT_ID
+```
+
+Docker/containers restart automatically. The public IP can change on restart; reopen your SSH tunnel and update any URLs using the old public IP. Stopping preserves database data on the disk. To refresh Terraform's recorded IP without redeploying:
+
+```bash
+terraform -chdir=infra/gcp apply -refresh-only
+terraform -chdir=infra/gcp output
+```
+
+To permanently remove the stack:
+
+```bash
+./scripts/gcp-destroy.sh
+```
+
+Review the destroy plan and type `destroy`. This deletes the VM, its boot/database disk, firewall and dedicated networking, including **all cloud users and links**. It keeps local data, source, the GCP project, billing link, enabled APIs and the console budget. Manually created snapshots or unrelated resources need separate cleanup. Keep Terraform state until destruction succeeds, then verify resources in Compute Engine/VPC and review Billing (reports can lag).
+
+Optional backup before destruction, on the VM in `/opt/bitly`:
+
+```bash
 sudo docker compose exec -T postgres pg_dump --clean --if-exists -U bitly bitly > bitly-backup.sql
-# Copy that file to your computer using scp before destroying.
-# Restore to a running local stack:
-docker compose exec -T postgres psql -U bitly bitly < bitly-backup.sql
 ```
 
-The dump includes DROP/CREATE statements, so restoring replaces the users/URL tables and their sequences. Stop the app during restore (`docker compose stop read write`) and restart afterward (`docker compose start write read`). This lab does not automate backups.
+Copy the backup to your Mac using `gcloud compute scp` before deleting the VM. Database dumps contain user/link data and must stay out of Git. Restoring this dump replaces user/link tables and sequences: stop read/write containers, restore with `docker compose exec -T postgres psql -U bitly bitly < bitly-backup.sql`, then restart them. Flush the disposable Redis cache after restore to prevent stale destinations. Automated backups are not configured.
 
 ## Understand the system design
 
@@ -153,7 +208,7 @@ flowchart LR
   DB --> Read
 ```
 
-Your drawing separates read and write services and a global counter. This deployment implements separate read and write FastAPI processes/containers behind an Nginx API gateway. The gateway also serves the frontend. All five containers share one VM for cost savings, so they still share a host failure domain. PostgreSQL `nextval` safely allocates distinct numeric IDs across concurrent writers. Base62 converts an ID into a compact code. A primary-key uniqueness constraint arbitrates custom-alias races; generated IDs skip any alias collisions. Sequence gaps are expected after failed transactions/deletions. Codes are predictable, so short links are not private access tokens.
+ This deployment implements separate read and write FastAPI processes/containers behind an Nginx API gateway. The gateway also serves the frontend. All five containers share one VM for cost savings, so they still share a host failure domain. PostgreSQL `nextval` safely allocates distinct numeric IDs across concurrent writers. Base62 converts an ID into a compact code. A primary-key uniqueness constraint arbitrates custom-alias races; generated IDs skip any alias collisions. Sequence gaps are expected after failed transactions/deletions. Codes are predictable, so short links are not private access tokens.
 
 The URL table stores `code`, `original_url`, `created_at`, nullable `expires_at` and `created_by` referencing `users.id`. The users table stores ID, unique normalized email, Argon2id password hash, creation timestamp and active status. New links always receive the authenticated owner ID from the server; a client cannot choose an owner. Expiration is checked during reads; expired rows stay available to management and can be deleted. There is no scheduled cleanup job.
 
@@ -164,8 +219,8 @@ A concurrent read can refill the cache after an update/delete invalidation, or i
 This cheap stack has one failure domain: losing the VM loses availability and terminating it loses data. Redis is disposable; PostgreSQL has persistent local storage but no high availability. To grow it:
 
 1. Add HTTPS, email verification/password recovery, authentication rate limiting and abuse handling.
-2. Move PostgreSQL to RDS with backups and restore drills; Redis to ElastiCache.
-3. Put multiple stateless API containers behind an ALB; scale the existing read and write services onto separate hosts according to traffic.
+2. Move PostgreSQL to Cloud SQL with backups and restore drills; Redis to Memorystore.
+3. Put multiple stateless API containers behind a Google Cloud Application Load Balancer; scale the existing read and write services onto separate hosts according to traffic.
 4. Add metrics for latency, error rate, cache hit rate, DB pool pressure, memory and disk capacity.
 5. Handle distributed cache invalidation and read replicas carefully: replica lag can resurrect old values after writes.
 6. Allocate ranges of sequence IDs to writers to reduce counter round trips at very high write rates; partition data only after measuring real bottlenecks.
@@ -186,19 +241,11 @@ docker compose exec redis redis-cli DBSIZE
 curl http://localhost:8000/health
 ```
 
-If Docker is unavailable, start Docker Desktop. If port 8000 is busy, set PORT in `.env` (also set TEST_BASE_URL for tests). If Terraform cannot create Budgets, verify billing permissions; free-plan service restrictions may also prevent deployment. Destroy any partially created resources if abandoning the deployment.
-
-## Verification in this workspace
-
-On October 10, 2026, the Docker stack was built and started, its frontend was inspected in the browser, and all five live integration tests passed. The same suite also passed with Redis stopped, and Redis was restarted afterward. Terraform initialization, formatting and provider-backed validation passed. AWS resources have not been created; an actual AWS apply requires your configured CIDR, key and budget recipient. Validation checks configuration, not account permissions or a successful cloud deployment.
-
-The JWT/user upgrade includes live checks for sign-up/sign-in, duplicate normalized emails, password validation, tampered/expired JWTs, required claims, issuer/audience and algorithm enforcement, and ownership isolation between two users, alongside the existing URL tests.
-
-All eight live tests passed after the JWT upgrade, including token rejection and cross-user authorization. Deployment scripts and environment examples now use JWT_SECRET instead of ADMIN_TOKEN.
+If Docker is unavailable, start Docker Desktop. If port 8000 is busy, set PORT in `.env` (also set TEST_BASE_URL for tests). If cloud deployment fails, check Compute Engine API enablement, IAM/OS Login permissions and billing status. Destroy any partially created resources if abandoning the deployment.
 
 ## Read/write services and gateway deployment
 
-Local and AWS deployment definitions now use the same five services through Compose. The local deployment has been exercised; AWS apply has not been run. Only the Nginx gateway publishes a host port (8000 locally, 80 on AWS). Backends, PostgreSQL and Redis are accessible only within the Docker network. Existing user/link data, JWT signing secret and volume names are retained during the upgrade; `--remove-orphans` removes the superseded app container without deleting the volume.
+Local and GCP deployments use the same five services through Compose. Only the Nginx gateway publishes a host port (8000 locally, 80 on GCP). Backends, PostgreSQL and Redis are accessible only within the Docker network. Existing user/link data, JWT signing secret and volume names are retained during the upgrade; `--remove-orphans` removes the superseded app container without deleting the volume.
 
 | Request | Gateway destination |
 |---|---|
@@ -215,7 +262,7 @@ Local and AWS deployment definitions now use the same five services through Comp
 
 The write service owns schema initialization, password hashing/token issuance, mutations, sequence allocation and cache invalidation. The read service owns cached redirects, metadata lookup and the authenticated per-user list. Startup waits for write-service readiness before starting read to ensure the schema exists. At runtime reads do not call the write service: a write-service outage does not prevent existing links from resolving or listing. Registration/login/me are unavailable during a write outage.
 
-The services share `app/common.py` and `app/auth.py`, one shared backend Dockerfile/source, PostgreSQL schema and database credentials in this lab. They have distinct entry points (`app.read:app`, `app.write:app`) and HTTP route sets and can be restarted independently. This is a read/write service split with shared storage, not fully isolated service-owned databases. Nginx dynamically resolves Docker DNS so replacing a backend container recovers after its short DNS cache expires. It is a self-hosted gateway, not the paid AWS API Gateway service.
+The services share `app/common.py` and `app/auth.py`, one shared backend Dockerfile/source, PostgreSQL schema and database credentials in this lab. They have distinct entry points (`app.read:app`, `app.write:app`) and HTTP route sets and can be restarted independently. This is a read/write service split with shared storage, not fully isolated service-owned databases. Nginx dynamically resolves Docker DNS so replacing a backend container recovers after its short DNS cache expires. It is a self-hosted gateway, a reverse proxy running inside the VM.
 
 ```bash
 ./scripts/local-deploy.sh
@@ -226,20 +273,19 @@ curl http://localhost:8000/health/read
 curl http://localhost:8000/health/write
 # Restart only one backend:
 docker compose restart read
-# To deploy this same topology to AWS:
-export SSH_KEY="$HOME/.ssh/bitly-lab"
-./scripts/aws-deploy.sh
+# Deploy the same topology to GCP:
+./scripts/gcp-deploy.sh
 ```
 
-The AWS upload now includes gateway configuration and frontend assets; cleanup scripts still remove the whole stack. Terraform resource tags, budget alerts and networking remain the same. There is no additional AWS service fee for these extra containers, but higher memory/CPU use can require a larger instance at increased cost. Container limits total 768 MiB; the existing 1 GiB swap helps on t3.micro, and sustained workloads should use more RAM. This topology supports independent process deployment, not multi-host high availability or automatic scaling.
+The GCP upload includes the gateway and frontend assets. Extra containers have no separate managed-service fee, but the VM has only 1 GiB RAM. Container limits total 768 MiB and bootstrap adds 1 GiB swap; a larger VM may be needed for sustained workloads. All containers share one host failure domain.
 
 For a local failure drill, run `./scripts/test-isolation.sh`. It briefly stops each backend in turn, verifies the other service continues working through Nginx, then restores both and removes only its own temporary user/links. Do not run it while using the local app for other work. Nginx proxy behavior follows its [official proxy module documentation](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass).
 
-After the service split, all nine live integration tests passed through Nginx. The read/write failure drill passed in both directions, Nginx configuration validation passed, and the AWS-mode Compose port configuration and remote shell script syntax were checked. Terraform infrastructure is unchanged; no AWS resources were created during this change.
+The nine live integration tests and read/write failure drill have passed through Nginx. Terraform configuration validation verifies syntax/provider compatibility; it does not prove billing eligibility or enforce a spending limit.
 
 ## Postman collection
 
-Import `postman/bitly.postman_collection.json` and `postman/bitly.postman_environment.json` into Postman, select the imported environment, and run the folders in order. It automatically registers test users, obtains JWTs, exercises link CRUD and verifies ownership restrictions. See `postman/README.md` for local/AWS URLs, redirect settings and test-data cleanup.
+Import `postman/bitly.postman_collection.json` and `postman/bitly.postman_environment.json` into Postman, select the imported environment, and run the folders in order. It automatically registers test users, obtains JWTs, exercises link CRUD and verifies ownership restrictions. See `postman/README.md` for local/GCP URLs, redirect settings and test-data cleanup.
 
 ## Connect desktop pgAdmin locally
 
@@ -251,8 +297,5 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --no-deps postgres
 
 In pgAdmin, Register → Server: name `Bitly Local`, host `127.0.0.1`, port `5432`, maintenance database `bitly`, username `bitly`, and password from `POSTGRES_PASSWORD` in `.env`. Expand Databases → bitly → Schemas → public → Tables to inspect users and urls.
 
-This optional override is not uploaded or used by AWS deployment. Local redeployment with the base Compose file removes the port mapping; reapply the override afterward if needed. If your machine already uses port 5432, change the override's host port to 5433 and use that port in pgAdmin.
+This optional override is not uploaded or used by GCP deployment. Local redeployment with the base Compose file removes the port mapping; reapply the override afterward if needed. If your machine already uses port 5432, change the override's host port to 5433 and use that port in pgAdmin.
 
-## Google Cloud alternative
-
-Use `scripts/gcp-deploy.sh` and `scripts/gcp-destroy.sh` with Terraform in `infra/gcp`. See `infra/gcp/README.md` for authentication, billing alerts, Free Tier limits, testing and cleanup. Local and AWS scripts remain available; AWS cleanup is separate.

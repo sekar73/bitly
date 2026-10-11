@@ -1,7 +1,7 @@
 # Postman testing
 
 1. In Postman, choose **Import** and select `bitly.postman_collection.json` and `bitly.postman_environment.json` from this directory.
-2. Select the **Bitly Lab — Local (change base_url for AWS)** environment.
+2. Select the **Bitly Lab — Local (change base_url for GCP)** environment.
 3. Confirm `base_url` is `http://localhost:8000` (no trailing slash).
 4. Open the collection's **Run** action and run all folders in order with one iteration. Alternatively, send requests individually in their listed order.
 
@@ -11,7 +11,7 @@ The collection includes 30 requests: separate backend health/schema checks, regi
 
 Redirect requests disable automatic redirect following using their per-request setting. If your Postman version still follows redirects, open the request's **Settings** and turn **Automatically follow redirects** off. Otherwise you will see the destination's response instead of the API's 302 status.
 
-For AWS, use the documented SSH tunnel and change `base_url` to `http://localhost:8080`. If you use the restricted EC2 HTTP endpoint directly, use `http://PUBLIC_IP`; its security-group CIDR must allow your IP, and HTTP does not encrypt your password/JWT. Use the tunnel for authentication requests.
+For GCP, use the documented SSH tunnel and change `base_url` to `http://localhost:8080`. If you use the restricted Compute Engine HTTP endpoint directly, use `http://PUBLIC_IP`; its security-group CIDR must allow your IP, and HTTP does not encrypt your password/JWT. Use the tunnel for authentication requests.
 
 The lifecycle folders delete their own links when they finish successfully. Test accounts remain because there is no account-deletion API. Re-running registration intentionally creates new accounts. Use your isolated learning database. If you interrupt a run, finish its DELETE requests to remove its links.
 
